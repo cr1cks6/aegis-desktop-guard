@@ -34,4 +34,26 @@ interface AegisRpc
     int AegisIsAntivirusAvailable(
         [out] int* available
     );
+
+    int AegisGetAvDatabaseInfo(
+        [out] int* loaded,
+        [out] unsigned long* recordCount,
+        [out, string] wchar_t** releaseDate
+    );
+
+    int AegisScanFile(
+        [in, string] const wchar_t* filePath,
+        [out] int* status,
+        [out, string] wchar_t** threatName,
+        [out] unsigned long* scannedObjects,
+        [out] unsigned long* infectedObjects
+    );
+
+    int AegisScanDirectory(
+        [in, string] const wchar_t* directoryPath,
+        [out] int* status,
+        [out, string] wchar_t** threatName,
+        [out] unsigned long* scannedObjects,
+        [out] unsigned long* infectedObjects
+    );
 }

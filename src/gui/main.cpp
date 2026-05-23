@@ -2,7 +2,6 @@
 #include "AegisRpc.h"
 
 #include <windows.h>
-#include <winerror.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
 #include <winsvc.h>
@@ -24,20 +23,122 @@ constexpr UINT kMainMenuExit = 3001;
 constexpr UINT kButtonLogin = 4001;
 constexpr UINT kButtonLogout = 4002;
 constexpr UINT kButtonActivate = 4003;
-constexpr UINT kButtonRefresh = 4004;
-constexpr UINT kLicensePollTimer = 5001;
+constexpr UINT kButtonScanFile = 4005;
+constexpr UINT kButtonScanDirectory = 4006;
+
+constexpr UINT kStatusTimer = 5001;
+
+constexpr COLORREF kBackgroundColor = RGB(18, 22, 30);
+constexpr COLORREF kPanelColor = RGB(30, 36, 48);
+constexpr COLORREF kEditColor = RGB(42, 48, 62);
+constexpr COLORREF kTextColor = RGB(235, 238, 245);
+constexpr COLORREF kMutedTextColor = RGB(170, 178, 190);
+constexpr COLORREF kAccentColor = RGB(0, 120, 215);
+constexpr COLORREF kSuccessColor = RGB(70, 220, 120);
+constexpr COLORREF kDangerColor = RGB(255, 90, 90);
 
 HINSTANCE g_instance = nullptr;
 HWND g_mainWindow = nullptr;
 UINT g_taskbarCreatedMessage = 0;
 NOTIFYICONDATAW g_trayIcon{};
 
-HWND g_userStatusLabel = nullptr;
-HWND g_licenseStatusLabel = nullptr;
-HWND g_featureStatusLabel = nullptr;
+HWND g_userLabel = nullptr;
+HWND g_licenseLabel = nullptr;
+HWND g_featureLabel = nullptr;
+HWND g_databaseLabel = nullptr;
+HWND g_scanResultLabel = nullptr;
+
 HWND g_usernameEdit = nullptr;
 HWND g_passwordEdit = nullptr;
 HWND g_activationEdit = nullptr;
+HWND g_filePathEdit = nullptr;
+HWND g_directoryPathEdit = nullptr;
+
+HFONT g_titleFont = nullptr;
+HFONT g_textFont = nullptr;
+HFONT g_buttonFont = nullptr;
+
+HBRUSH g_backgroundBrush = nullptr;
+HBRUSH g_panelBrush = nullptr;
+HBRUSH g_editBrush = nullptr;
+
+void InitializeVisualStyle()
+{
+    g_backgroundBrush = CreateSolidBrush(kBackgroundColor);
+    g_panelBrush = CreateSolidBrush(kPanelColor);
+    g_editBrush = CreateSolidBrush(kEditColor);
+
+    g_titleFont = CreateFontW(
+        30, 0, 0, 0, FW_SEMIBOLD,
+        FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI"
+    );
+
+    g_textFont = CreateFontW(
+        17, 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI"
+    );
+
+    g_buttonFont = CreateFontW(
+        16, 0, 0, 0, FW_SEMIBOLD,
+        FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI"
+    );
+}
+
+void ReleaseVisualStyle()
+{
+    if (g_titleFont != nullptr) {
+        DeleteObject(g_titleFont);
+        g_titleFont = nullptr;
+    }
+
+    if (g_textFont != nullptr) {
+        DeleteObject(g_textFont);
+        g_textFont = nullptr;
+    }
+
+    if (g_buttonFont != nullptr) {
+        DeleteObject(g_buttonFont);
+        g_buttonFont = nullptr;
+    }
+
+    if (g_backgroundBrush != nullptr) {
+        DeleteObject(g_backgroundBrush);
+        g_backgroundBrush = nullptr;
+    }
+
+    if (g_panelBrush != nullptr) {
+        DeleteObject(g_panelBrush);
+        g_panelBrush = nullptr;
+    }
+
+    if (g_editBrush != nullptr) {
+        DeleteObject(g_editBrush);
+        g_editBrush = nullptr;
+    }
+}
+
+void SetControlFont(HWND control, HFONT font)
+{
+    SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
 
 bool BindRpc()
 {
@@ -66,6 +167,7 @@ void UnbindRpc()
 {
     if (AegisRpcBinding != nullptr) {
         RpcBindingFree(&AegisRpcBinding);
+        AegisRpcBinding = nullptr;
     }
 }
 
@@ -77,10 +179,28 @@ std::wstring GetWindowTextString(HWND window)
         return {};
     }
 
-    std::wstring value(static_cast<size_t>(length), L'\0');
+    std::wstring value(static_cast<std::size_t>(length), L'\0');
     GetWindowTextW(window, value.data(), length + 1);
 
     return value;
+}
+
+std::wstring ScanStatusToText(int status)
+{
+    switch (status) {
+    case 0:
+        return L"CLEAN";
+    case 1:
+        return L"INFECTED";
+    case 2:
+        return L"ERROR";
+    case 3:
+        return L"DATABASE NOT LOADED";
+    case 4:
+        return L"LICENSE REQUIRED";
+    default:
+        return L"UNKNOWN";
+    }
 }
 
 bool RpcGetCurrentUser(bool& authenticated, std::wstring& username)
@@ -250,46 +370,249 @@ bool RpcIsAntivirusAvailable(bool& available)
     return result == 0;
 }
 
-void RefreshMainScreen()
+bool RpcGetDatabaseInfo(bool& loaded, unsigned long& recordCount, std::wstring& releaseDate)
+{
+    loaded = false;
+    recordCount = 0;
+    releaseDate.clear();
+
+    if (!BindRpc()) {
+        return false;
+    }
+
+    int rpcLoaded = 0;
+    wchar_t* rpcReleaseDate = nullptr;
+    int result = 1;
+
+    RpcTryExcept
+    {
+        result = AegisGetAvDatabaseInfo(&rpcLoaded, &recordCount, &rpcReleaseDate);
+    }
+    RpcExcept(1)
+    {
+        result = 1;
+    }
+    RpcEndExcept
+
+    if (result == 0) {
+        loaded = rpcLoaded != 0;
+
+        if (rpcReleaseDate != nullptr) {
+            releaseDate = rpcReleaseDate;
+            midl_user_free(rpcReleaseDate);
+        }
+    }
+
+    UnbindRpc();
+    return result == 0;
+}
+
+bool RpcScanFile(
+    const std::wstring& path,
+    int& status,
+    std::wstring& threatName,
+    unsigned long& scannedObjects,
+    unsigned long& infectedObjects)
+{
+    status = 2;
+    threatName.clear();
+    scannedObjects = 0;
+    infectedObjects = 0;
+
+    if (!BindRpc()) {
+        return false;
+    }
+
+    wchar_t* rpcThreatName = nullptr;
+    int result = 1;
+
+    RpcTryExcept
+    {
+        result = AegisScanFile(
+            path.c_str(),
+            &status,
+            &rpcThreatName,
+            &scannedObjects,
+            &infectedObjects
+        );
+    }
+    RpcExcept(1)
+    {
+        result = 1;
+    }
+    RpcEndExcept
+
+    if (result == 0 && rpcThreatName != nullptr) {
+        threatName = rpcThreatName;
+        midl_user_free(rpcThreatName);
+    }
+
+    UnbindRpc();
+    return result == 0;
+}
+
+bool RpcScanDirectory(
+    const std::wstring& path,
+    int& status,
+    std::wstring& threatName,
+    unsigned long& scannedObjects,
+    unsigned long& infectedObjects)
+{
+    status = 2;
+    threatName.clear();
+    scannedObjects = 0;
+    infectedObjects = 0;
+
+    if (!BindRpc()) {
+        return false;
+    }
+
+    wchar_t* rpcThreatName = nullptr;
+    int result = 1;
+
+    RpcTryExcept
+    {
+        result = AegisScanDirectory(
+            path.c_str(),
+            &status,
+            &rpcThreatName,
+            &scannedObjects,
+            &infectedObjects
+        );
+    }
+    RpcExcept(1)
+    {
+        result = 1;
+    }
+    RpcEndExcept
+
+    if (result == 0 && rpcThreatName != nullptr) {
+        threatName = rpcThreatName;
+        midl_user_free(rpcThreatName);
+    }
+
+    UnbindRpc();
+    return result == 0;
+}
+
+void RefreshUi()
 {
     bool authenticated = false;
     std::wstring username;
 
-    if (RpcGetCurrentUser(authenticated, username) && authenticated) {
-        SetWindowTextW(
-            g_userStatusLabel,
-            (L"Пользователь: " + username).c_str()
-        );
+    RpcGetCurrentUser(authenticated, username);
+
+    if (authenticated) {
+        SetWindowTextW(g_userLabel, (L"● Пользователь: " + username).c_str());
     } else {
-        SetWindowTextW(g_userStatusLabel, L"Пользователь не вошёл в аккаунт");
+        SetWindowTextW(g_userLabel, L"● Пользователь не вошёл");
     }
 
     bool licenseActive = false;
     std::wstring expiresAt;
 
-    if (RpcGetLicense(licenseActive, expiresAt) && licenseActive) {
-        SetWindowTextW(
-            g_licenseStatusLabel,
-            (L"Лицензия активна до: " + expiresAt).c_str()
-        );
+    RpcGetLicense(licenseActive, expiresAt);
+
+    if (licenseActive) {
+        SetWindowTextW(g_licenseLabel, (L"● Лицензия активна до: " + expiresAt).c_str());
     } else {
-        SetWindowTextW(g_licenseStatusLabel, L"Лицензия отсутствует");
+        SetWindowTextW(g_licenseLabel, L"● Лицензия отсутствует");
     }
 
-    bool available = false;
+    bool antivirusAvailable = false;
+    RpcIsAntivirusAvailable(antivirusAvailable);
 
-    if (RpcIsAntivirusAvailable(available) && available) {
-        SetWindowTextW(g_featureStatusLabel, L"Антивирусная функциональность: доступна");
+    if (antivirusAvailable) {
+        SetWindowTextW(g_featureLabel, L"● Антивирусная защита: активна");
     } else {
-        SetWindowTextW(g_featureStatusLabel, L"Антивирусная функциональность: заблокирована");
+        SetWindowTextW(g_featureLabel, L"● Антивирусная защита: заблокирована");
+    }
+
+    bool dbLoaded = false;
+    unsigned long dbRecords = 0;
+    std::wstring dbDate;
+
+    RpcGetDatabaseInfo(dbLoaded, dbRecords, dbDate);
+
+    if (dbLoaded) {
+        const std::wstring text =
+            L"● Базы: " +
+            std::to_wstring(dbRecords) +
+            L" сигнатур | дата выпуска: " +
+            dbDate;
+
+        SetWindowTextW(g_databaseLabel, text.c_str());
+    } else {
+        SetWindowTextW(g_databaseLabel, L"● Антивирусные базы не загружены");
     }
 }
 
-void ShowMainWindow()
+void PerformFileScan()
 {
-    RefreshMainScreen();
-    ShowWindow(g_mainWindow, SW_SHOW);
-    SetForegroundWindow(g_mainWindow);
+    const std::wstring path = GetWindowTextString(g_filePathEdit);
+
+    if (path.empty()) {
+        MessageBoxW(g_mainWindow, L"Введите путь к файлу.", L"Aegis Desktop Guard", MB_ICONWARNING);
+        return;
+    }
+
+    int status = 0;
+    std::wstring threatName;
+    unsigned long scannedObjects = 0;
+    unsigned long infectedObjects = 0;
+
+    if (!RpcScanFile(path, status, threatName, scannedObjects, infectedObjects)) {
+        MessageBoxW(g_mainWindow, L"Ошибка RPC-сканирования файла.", L"Aegis Desktop Guard", MB_ICONERROR);
+        return;
+    }
+
+    std::wstring result =
+        L"Результат файла: " +
+        ScanStatusToText(status) +
+        L" | проверено: " +
+        std::to_wstring(scannedObjects) +
+        L" | заражено: " +
+        std::to_wstring(infectedObjects);
+
+    if (!threatName.empty()) {
+        result += L" | угроза: " + threatName;
+    }
+
+    SetWindowTextW(g_scanResultLabel, result.c_str());
+}
+
+void PerformDirectoryScan()
+{
+    const std::wstring path = GetWindowTextString(g_directoryPathEdit);
+
+    if (path.empty()) {
+        MessageBoxW(g_mainWindow, L"Введите путь к папке.", L"Aegis Desktop Guard", MB_ICONWARNING);
+        return;
+    }
+
+    int status = 0;
+    std::wstring threatName;
+    unsigned long scannedObjects = 0;
+    unsigned long infectedObjects = 0;
+
+    if (!RpcScanDirectory(path, status, threatName, scannedObjects, infectedObjects)) {
+        MessageBoxW(g_mainWindow, L"Ошибка RPC-сканирования папки.", L"Aegis Desktop Guard", MB_ICONERROR);
+        return;
+    }
+
+    std::wstring result =
+        L"Результат папки: " +
+        ScanStatusToText(status) +
+        L" | проверено: " +
+        std::to_wstring(scannedObjects) +
+        L" | заражено: " +
+        std::to_wstring(infectedObjects);
+
+    if (!threatName.empty()) {
+        result += L" | угроза: " + threatName;
+    }
+
+    SetWindowTextW(g_scanResultLabel, result.c_str());
 }
 
 void RequestServiceStop()
@@ -312,48 +635,8 @@ void RequestServiceStop()
 
 void ExitApplication()
 {
-    RequestServiceStop();
     Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
     PostQuitMessage(0);
-}
-
-HICON CreateTrayIcon()
-{
-    HDC screenDc = GetDC(nullptr);
-    HDC memoryDc = CreateCompatibleDC(screenDc);
-    HBITMAP bitmap = CreateCompatibleBitmap(screenDc, 32, 32);
-
-    HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memoryDc, bitmap));
-
-    HBRUSH backgroundBrush = CreateSolidBrush(RGB(30, 100, 190));
-    RECT backgroundRect{0, 0, 32, 32};
-    FillRect(memoryDc, &backgroundRect, backgroundBrush);
-
-    HPEN whitePen = CreatePen(PS_SOLID, 3, RGB(255, 255, 255));
-    HPEN oldPen = static_cast<HPEN>(SelectObject(memoryDc, whitePen));
-
-    MoveToEx(memoryDc, 8, 17, nullptr);
-    LineTo(memoryDc, 14, 23);
-    LineTo(memoryDc, 25, 8);
-
-    SelectObject(memoryDc, oldPen);
-    SelectObject(memoryDc, oldBitmap);
-
-    DeleteObject(whitePen);
-    DeleteObject(backgroundBrush);
-
-    ICONINFO iconInfo{};
-    iconInfo.fIcon = TRUE;
-    iconInfo.hbmColor = bitmap;
-    iconInfo.hbmMask = bitmap;
-
-    HICON icon = CreateIconIndirect(&iconInfo);
-
-    DeleteObject(bitmap);
-    DeleteDC(memoryDc);
-    ReleaseDC(nullptr, screenDc);
-
-    return icon;
 }
 
 void AddTrayIcon(HWND window)
@@ -365,294 +648,334 @@ void AddTrayIcon(HWND window)
     g_trayIcon.uID = kTrayIconId;
     g_trayIcon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_trayIcon.uCallbackMessage = kTrayMessage;
-    g_trayIcon.hIcon = CreateTrayIcon();
+    g_trayIcon.hIcon = LoadIconW(nullptr, IDI_SHIELD);
 
     wcscpy_s(g_trayIcon.szTip, L"Aegis Desktop Guard");
 
     Shell_NotifyIconW(NIM_ADD, &g_trayIcon);
 }
 
-void ShowTrayMenu(HWND window)
+void DrawPanel(HDC dc, int x, int y, int width, int height)
 {
-    HMENU menu = CreatePopupMenu();
+    RECT rect{x, y, x + width, y + height};
+    FillRect(dc, &rect, g_panelBrush);
 
-    AppendMenuW(menu, MF_STRING, kMenuOpen, L"Открыть");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuExit, L"Выход");
+    HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(52, 60, 76));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(dc, borderPen));
 
-    POINT cursorPosition{};
-    GetCursorPos(&cursorPosition);
+    MoveToEx(dc, rect.left, rect.top, nullptr);
+    LineTo(dc, rect.right, rect.top);
+    LineTo(dc, rect.right, rect.bottom);
+    LineTo(dc, rect.left, rect.bottom);
+    LineTo(dc, rect.left, rect.top);
 
-    SetForegroundWindow(window);
-
-    TrackPopupMenu(
-        menu,
-        TPM_RIGHTBUTTON,
-        cursorPosition.x,
-        cursorPosition.y,
-        0,
-        window,
-        nullptr
-    );
-
-    DestroyMenu(menu);
+    SelectObject(dc, oldPen);
+    DeleteObject(borderPen);
 }
 
 void CreateMainMenu(HWND window)
 {
-    HMENU mainMenu = CreateMenu();
+    HMENU menu = CreateMenu();
     HMENU fileMenu = CreatePopupMenu();
 
     AppendMenuW(fileMenu, MF_STRING, kMainMenuExit, L"Выход");
-    AppendMenuW(mainMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"Файл");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"Файл");
 
-    SetMenu(window, mainMenu);
+    SetMenu(window, menu);
 }
 
-void CreateMainControls(HWND window)
+void CreateControls(HWND window)
 {
-    CreateWindowW(L"STATIC", L"Aegis Desktop Guard",
+    HWND title = CreateWindowW(
+        L"STATIC",
+        L"Aegis Desktop Guard",
         WS_CHILD | WS_VISIBLE,
-        30, 35, 350, 25,
-        window, nullptr, g_instance, nullptr);
-
-    g_userStatusLabel = CreateWindowW(L"STATIC", L"Пользователь: проверка...",
-        WS_CHILD | WS_VISIBLE,
-        30, 75, 500, 25,
-        window, nullptr, g_instance, nullptr);
-
-    g_licenseStatusLabel = CreateWindowW(L"STATIC", L"Лицензия: проверка...",
-        WS_CHILD | WS_VISIBLE,
-        30, 105, 500, 25,
-        window, nullptr, g_instance, nullptr);
-
-    g_featureStatusLabel = CreateWindowW(L"STATIC", L"Функциональность: проверка...",
-        WS_CHILD | WS_VISIBLE,
-        30, 135, 500, 25,
-        window, nullptr, g_instance, nullptr);
-
-    CreateWindowW(L"STATIC", L"Логин:",
-        WS_CHILD | WS_VISIBLE,
-        30, 190, 120, 25,
-        window, nullptr, g_instance, nullptr);
-
-    g_usernameEdit = CreateWindowW(L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-        150, 185, 250, 28,
-        window, nullptr, g_instance, nullptr);
-
-    CreateWindowW(L"STATIC", L"Пароль:",
-        WS_CHILD | WS_VISIBLE,
-        30, 225, 120, 25,
-        window, nullptr, g_instance, nullptr);
-
-    g_passwordEdit = CreateWindowW(L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
-        150, 220, 250, 28,
-        window, nullptr, g_instance, nullptr);
-
-    CreateWindowW(L"BUTTON", L"Войти",
-        WS_CHILD | WS_VISIBLE,
-        420, 185, 120, 30,
-        window, reinterpret_cast<HMENU>(kButtonLogin), g_instance, nullptr);
-
-    CreateWindowW(L"BUTTON", L"Выйти из аккаунта",
-        WS_CHILD | WS_VISIBLE,
-        420, 220, 160, 30,
-        window, reinterpret_cast<HMENU>(kButtonLogout), g_instance, nullptr);
-
-    CreateWindowW(L"STATIC", L"Код активации:",
-        WS_CHILD | WS_VISIBLE,
-        30, 285, 120, 25,
-        window, nullptr, g_instance, nullptr);
-
-    g_activationEdit = CreateWindowW(L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-        150, 280, 250, 28,
-        window, nullptr, g_instance, nullptr);
-
-    CreateWindowW(L"BUTTON", L"Активировать",
-        WS_CHILD | WS_VISIBLE,
-        420, 280, 140, 30,
-        window, reinterpret_cast<HMENU>(kButtonActivate), g_instance, nullptr);
-
-    CreateWindowW(L"BUTTON", L"Обновить статус",
-        WS_CHILD | WS_VISIBLE,
-        30, 340, 160, 30,
-        window, reinterpret_cast<HMENU>(kButtonRefresh), g_instance, nullptr);
-
-    CreateWindowW(L"STATIC", L"Тестовый код активации: AEGIS-2026",
-        WS_CHILD | WS_VISIBLE,
-        30, 390, 400, 25,
-        window, nullptr, g_instance, nullptr);
-}
-
-bool StartServiceIfNeeded()
-{
-    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-
-    if (manager == nullptr) {
-        return false;
-    }
-
-    SC_HANDLE service = OpenServiceW(
-        manager,
-        aegis::kServiceName,
-        SERVICE_QUERY_STATUS | SERVICE_START
+        28, 24, 440, 38,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
     );
+    SetControlFont(title, g_titleFont);
 
-    if (service == nullptr) {
-        CloseServiceHandle(manager);
-        return false;
-    }
-
-    SERVICE_STATUS_PROCESS status{};
-    DWORD bytesNeeded = 0;
-
-    QueryServiceStatusEx(
-        service,
-        SC_STATUS_PROCESS_INFO,
-        reinterpret_cast<LPBYTE>(&status),
-        sizeof(status),
-        &bytesNeeded
+    HWND subtitle = CreateWindowW(
+        L"STATIC",
+        L"Service-based antivirus dashboard",
+        WS_CHILD | WS_VISIBLE,
+        31, 62, 460, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
     );
+    SetControlFont(subtitle, g_textFont);
 
-    if (status.dwCurrentState == SERVICE_RUNNING) {
-        CloseServiceHandle(service);
-        CloseServiceHandle(manager);
-        return false;
-    }
+    g_userLabel = CreateWindowW(
+        L"STATIC",
+        L"Пользователь",
+        WS_CHILD | WS_VISIBLE,
+        48, 122, 720, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_userLabel, g_textFont);
 
-    StartServiceW(service, 0, nullptr);
+    g_licenseLabel = CreateWindowW(
+        L"STATIC",
+        L"Лицензия",
+        WS_CHILD | WS_VISIBLE,
+        48, 152, 720, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_licenseLabel, g_textFont);
 
-    for (DWORD elapsed = 0; elapsed < aegis::kServiceStartTimeoutMs;
-         elapsed += aegis::kServicePollIntervalMs) {
-        Sleep(aegis::kServicePollIntervalMs);
+    g_featureLabel = CreateWindowW(
+        L"STATIC",
+        L"Статус защиты",
+        WS_CHILD | WS_VISIBLE,
+        48, 182, 720, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_featureLabel, g_textFont);
 
-        QueryServiceStatusEx(
-            service,
-            SC_STATUS_PROCESS_INFO,
-            reinterpret_cast<LPBYTE>(&status),
-            sizeof(status),
-            &bytesNeeded
-        );
+    g_databaseLabel = CreateWindowW(
+        L"STATIC",
+        L"Антивирусные базы",
+        WS_CHILD | WS_VISIBLE,
+        48, 212, 760, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_databaseLabel, g_textFont);
 
-        if (status.dwCurrentState == SERVICE_RUNNING) {
-            break;
-        }
-    }
+    HWND loginText = CreateWindowW(
+        L"STATIC",
+        L"Аккаунт",
+        WS_CHILD | WS_VISIBLE,
+        48, 274, 160, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(loginText, g_textFont);
 
-    CloseServiceHandle(service);
-    CloseServiceHandle(manager);
+    HWND loginLabel = CreateWindowW(
+        L"STATIC",
+        L"Логин:",
+        WS_CHILD | WS_VISIBLE,
+        48, 315, 90, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(loginLabel, g_textFont);
 
-    return true;
+    g_usernameEdit = CreateWindowW(
+        L"EDIT",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+        140, 312, 210, 28,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_usernameEdit, g_textFont);
+
+    HWND passwordLabel = CreateWindowW(
+        L"STATIC",
+        L"Пароль:",
+        WS_CHILD | WS_VISIBLE,
+        48, 353, 90, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(passwordLabel, g_textFont);
+
+    g_passwordEdit = CreateWindowW(
+        L"EDIT",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD | ES_AUTOHSCROLL,
+        140, 350, 210, 28,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_passwordEdit, g_textFont);
+
+    HWND loginButton = CreateWindowW(
+        L"BUTTON",
+        L"Войти",
+        WS_CHILD | WS_VISIBLE,
+        370, 311, 130, 31,
+        window,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonLogin)),
+        g_instance,
+        nullptr
+    );
+    SetControlFont(loginButton, g_buttonFont);
+
+    HWND logoutButton = CreateWindowW(
+        L"BUTTON",
+        L"Выйти",
+        WS_CHILD | WS_VISIBLE,
+        370, 349, 130, 31,
+        window,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonLogout)),
+        g_instance,
+        nullptr
+    );
+    SetControlFont(logoutButton, g_buttonFont);
+
+    HWND activationText = CreateWindowW(
+        L"STATIC",
+        L"Активация продукта",
+        WS_CHILD | WS_VISIBLE,
+        48, 420, 260, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(activationText, g_textFont);
+
+    g_activationEdit = CreateWindowW(
+        L"EDIT",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+        48, 456, 300, 28,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_activationEdit, g_textFont);
+
+    HWND activateButton = CreateWindowW(
+        L"BUTTON",
+        L"Активировать",
+        WS_CHILD | WS_VISIBLE,
+        370, 454, 150, 31,
+        window,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonActivate)),
+        g_instance,
+        nullptr
+    );
+    SetControlFont(activateButton, g_buttonFont);
+
+    HWND scanText = CreateWindowW(
+        L"STATIC",
+        L"Сканирование",
+        WS_CHILD | WS_VISIBLE,
+        560, 274, 180, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(scanText, g_textFont);
+
+    HWND fileLabel = CreateWindowW(
+        L"STATIC",
+        L"Файл:",
+        WS_CHILD | WS_VISIBLE,
+        560, 315, 80, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(fileLabel, g_textFont);
+
+    g_filePathEdit = CreateWindowW(
+        L"EDIT",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+        630, 312, 330, 28,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_filePathEdit, g_textFont);
+
+    HWND scanFileButton = CreateWindowW(
+        L"BUTTON",
+        L"Сканировать файл",
+        WS_CHILD | WS_VISIBLE,
+        970, 310, 170, 31,
+        window,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonScanFile)),
+        g_instance,
+        nullptr
+    );
+    SetControlFont(scanFileButton, g_buttonFont);
+
+    HWND directoryLabel = CreateWindowW(
+        L"STATIC",
+        L"Папка:",
+        WS_CHILD | WS_VISIBLE,
+        560, 353, 80, 24,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(directoryLabel, g_textFont);
+
+    g_directoryPathEdit = CreateWindowW(
+        L"EDIT",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+        630, 350, 330, 28,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_directoryPathEdit, g_textFont);
+
+    HWND scanDirButton = CreateWindowW(
+        L"BUTTON",
+        L"Сканировать папку",
+        WS_CHILD | WS_VISIBLE,
+        970, 348, 170, 31,
+        window,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kButtonScanDirectory)),
+        g_instance,
+        nullptr
+    );
+    SetControlFont(scanDirButton, g_buttonFont);
+
+    g_scanResultLabel = CreateWindowW(
+        L"STATIC",
+        L"Результаты сканирования появятся здесь",
+        WS_CHILD | WS_VISIBLE,
+        560, 420, 570, 90,
+        window,
+        nullptr,
+        g_instance,
+        nullptr
+    );
+    SetControlFont(g_scanResultLabel, g_textFont);
 }
 
-DWORD GetParentProcessId()
-{
-    DWORD currentProcessId = GetCurrentProcessId();
-
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        return 0;
-    }
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-
-    if (!Process32FirstW(snapshot, &entry)) {
-        CloseHandle(snapshot);
-        return 0;
-    }
-
-    do {
-        if (entry.th32ProcessID == currentProcessId) {
-            CloseHandle(snapshot);
-            return entry.th32ParentProcessID;
-        }
-    } while (Process32NextW(snapshot, &entry));
-
-    CloseHandle(snapshot);
-    return 0;
-}
-
-std::wstring GetProcessName(DWORD processId)
-{
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        return {};
-    }
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-
-    if (!Process32FirstW(snapshot, &entry)) {
-        CloseHandle(snapshot);
-        return {};
-    }
-
-    do {
-        if (entry.th32ProcessID == processId) {
-            std::wstring name = entry.szExeFile;
-            CloseHandle(snapshot);
-            return name;
-        }
-    } while (Process32NextW(snapshot, &entry));
-
-    CloseHandle(snapshot);
-    return {};
-}
-
-bool IsStartedByService()
-{
-    const DWORD parentId = GetParentProcessId();
-
-    if (parentId == 0) {
-        return false;
-    }
-
-    const std::wstring parentName = GetProcessName(parentId);
-
-    return parentName == L"AegisDesktopGuardService.exe";
-}
-
-void HandleLogin()
-{
-    const std::wstring username = GetWindowTextString(g_usernameEdit);
-    const std::wstring password = GetWindowTextString(g_passwordEdit);
-
-    if (RpcLogin(username, password)) {
-        MessageBoxW(g_mainWindow, L"Вход выполнен успешно.", L"Aegis", MB_OK | MB_ICONINFORMATION);
-    } else {
-        MessageBoxW(g_mainWindow, L"Ошибка входа. Проверьте логин и пароль.", L"Aegis", MB_OK | MB_ICONERROR);
-    }
-
-    RefreshMainScreen();
-}
-
-void HandleLogout()
-{
-    RpcLogout();
-    MessageBoxW(g_mainWindow, L"Выход из аккаунта выполнен.", L"Aegis", MB_OK | MB_ICONINFORMATION);
-    RefreshMainScreen();
-}
-
-void HandleActivation()
-{
-    const std::wstring code = GetWindowTextString(g_activationEdit);
-
-    if (RpcActivate(code)) {
-        MessageBoxW(g_mainWindow, L"Продукт успешно активирован.", L"Aegis", MB_OK | MB_ICONINFORMATION);
-    } else {
-        MessageBoxW(g_mainWindow, L"Ошибка активации. Используй код AEGIS-2026 после входа в аккаунт.", L"Aegis", MB_OK | MB_ICONERROR);
-    }
-
-    RefreshMainScreen();
-}
-
-LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == g_taskbarCreatedMessage) {
         AddTrayIcon(window);
@@ -661,51 +984,107 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 
     switch (message) {
     case WM_CREATE:
+        InitializeVisualStyle();
         CreateMainMenu(window);
-        CreateMainControls(window);
+        CreateControls(window);
+        SetTimer(window, kStatusTimer, 3000, nullptr);
         AddTrayIcon(window);
-        SetTimer(window, kLicensePollTimer, 5000, nullptr);
-        RefreshMainScreen();
+        RefreshUi();
         return 0;
+
+    case WM_ERASEBKGND:
+    {
+        RECT rect{};
+        GetClientRect(window, &rect);
+        FillRect(reinterpret_cast<HDC>(wParam), &rect, g_backgroundBrush);
+        return 1;
+    }
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(window, &ps);
+
+        DrawPanel(dc, 28, 105, 1090, 145);
+        DrawPanel(dc, 28, 260, 500, 245);
+        DrawPanel(dc, 540, 260, 600, 260);
+
+        EndPaint(window, &ps);
+        return 0;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, kTextColor);
+        SetBkMode(dc, TRANSPARENT);
+        return reinterpret_cast<LRESULT>(g_backgroundBrush);
+    }
+
+    case WM_CTLCOLOREDIT:
+    {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, kTextColor);
+        SetBkColor(dc, kEditColor);
+        return reinterpret_cast<LRESULT>(g_editBrush);
+    }
+
+    case WM_CTLCOLORBTN:
+    {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, kTextColor);
+        SetBkColor(dc, kPanelColor);
+        return reinterpret_cast<LRESULT>(g_panelBrush);
+    }
 
     case WM_TIMER:
-        if (wParam == kLicensePollTimer) {
-            RefreshMainScreen();
-        }
-        return 0;
-
-    case kTrayMessage:
-        if (lParam == WM_LBUTTONUP) {
-            ShowMainWindow();
-        } else if (lParam == WM_RBUTTONUP) {
-            ShowTrayMenu(window);
+        if (wParam == kStatusTimer) {
+            RefreshUi();
         }
         return 0;
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case kButtonLogin:
-            HandleLogin();
+        {
+            const std::wstring username = GetWindowTextString(g_usernameEdit);
+            const std::wstring password = GetWindowTextString(g_passwordEdit);
+
+            if (!RpcLogin(username, password)) {
+                MessageBoxW(window, L"Ошибка входа.", L"Aegis Desktop Guard", MB_ICONERROR);
+            }
+
+            RefreshUi();
             return 0;
+        }
 
         case kButtonLogout:
-            HandleLogout();
+            RpcLogout();
+            RefreshUi();
             return 0;
 
         case kButtonActivate:
-            HandleActivation();
+        {
+            const std::wstring code = GetWindowTextString(g_activationEdit);
+
+            if (!RpcActivate(code)) {
+                MessageBoxW(window, L"Ошибка активации.", L"Aegis Desktop Guard", MB_ICONERROR);
+            }
+
+            RefreshUi();
+            return 0;
+        }
+
+        case kButtonScanFile:
+            PerformFileScan();
             return 0;
 
-        case kButtonRefresh:
-            RefreshMainScreen();
+        case kButtonScanDirectory:
+            PerformDirectoryScan();
             return 0;
 
-        case kMenuOpen:
-            ShowMainWindow();
-            return 0;
-
-        case kMenuExit:
         case kMainMenuExit:
+            RequestServiceStop();
             ExitApplication();
             return 0;
 
@@ -713,13 +1092,58 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             return 0;
         }
 
+    case kTrayMessage:
+        if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == WM_LBUTTONDBLCLK) {
+            ShowWindow(window, SW_SHOW);
+            SetForegroundWindow(window);
+            return 0;
+        }
+
+        if (LOWORD(lParam) == WM_RBUTTONUP) {
+            HMENU menu = CreatePopupMenu();
+
+            AppendMenuW(menu, MF_STRING, kMenuOpen, L"Открыть");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, kMenuExit, L"Выход");
+
+            POINT cursor{};
+            GetCursorPos(&cursor);
+
+            SetForegroundWindow(window);
+
+            const UINT command = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_NONOTIFY,
+                cursor.x,
+                cursor.y,
+                0,
+                window,
+                nullptr
+            );
+
+            DestroyMenu(menu);
+
+            if (command == kMenuOpen) {
+                ShowWindow(window, SW_SHOW);
+                SetForegroundWindow(window);
+            } else if (command == kMenuExit) {
+                RequestServiceStop();
+                ExitApplication();
+            }
+
+            return 0;
+        }
+
+        return 0;
+
     case WM_CLOSE:
         ShowWindow(window, SW_HIDE);
         return 0;
 
     case WM_DESTROY:
-        KillTimer(window, kLicensePollTimer);
+        KillTimer(window, kStatusTimer);
         Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
+        ReleaseVisualStyle();
         PostQuitMessage(0);
         return 0;
 
@@ -728,21 +1152,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     }
 }
 
-bool RegisterMainWindowClass()
-{
-    WNDCLASSEXW windowClass{};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = WindowProcedure;
-    windowClass.hInstance = g_instance;
-    windowClass.lpszClassName = kWindowClassName;
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hIcon = LoadIconW(nullptr, IDI_SHIELD);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-
-    return RegisterClassExW(&windowClass) != 0;
-}
-
-bool HasArgument(LPWSTR commandLine, const std::wstring& expected)
+bool HasArgument(PWSTR commandLine, const std::wstring& expected)
 {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(commandLine, &argc);
@@ -778,41 +1188,47 @@ extern "C" void __RPC_USER midl_user_free(void* pointer)
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCommand)
 {
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, aegis::kGuiMutexName);
+
+    if (mutex == nullptr || GetLastError() == 183) {
+        return 0;
+    }
+
     g_instance = instance;
-
-    const bool serviceWasStarted = StartServiceIfNeeded();
-
-    if (serviceWasStarted) {
-        return 0;
-    }
-
-    if (!IsStartedByService()) {
-        return 0;
-    }
-
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
 
-    if (!RegisterMainWindowClass()) {
-        return 1;
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = WindowProc;
+    windowClass.hInstance = instance;
+    windowClass.lpszClassName = kWindowClassName;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hIcon = LoadIconW(nullptr, IDI_SHIELD);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+
+    if (RegisterClassExW(&windowClass) == 0) {
+        CloseHandle(mutex);
+        return 0;
     }
 
     g_mainWindow = CreateWindowExW(
         0,
         kWindowClassName,
         L"Aegis Desktop Guard",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        760,
-        520,
+        1190,
+        650,
         nullptr,
         nullptr,
-        g_instance,
+        instance,
         nullptr
     );
 
     if (g_mainWindow == nullptr) {
-        return 1;
+        CloseHandle(mutex);
+        return 0;
     }
 
     const bool startHidden = HasArgument(commandLine, L"--background");
@@ -824,10 +1240,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
 
     MSG message{};
 
-    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    while (GetMessageW(&message, nullptr, 0, 0)) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+
+    CloseHandle(mutex);
 
     return static_cast<int>(message.wParam);
 }

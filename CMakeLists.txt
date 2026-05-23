@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(AegisDesktopGuardTask2 VERSION 0.2.0 LANGUAGES C CXX)
+project(AegisDesktopGuardTask4 VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -162,12 +162,23 @@ add_executable(AegisDesktopGuardService
 
     src/service/FeatureGate.h
     src/service/FeatureGate.cpp
+
+    src/service/AvTypes.h
+    src/service/AvDatabase.h
+    src/service/AvDatabase.cpp
+
+    src/service/AvScanner.h
+    src/service/AvScanner.cpp
+
+    src/service/ScanManager.h
+    src/service/ScanManager.cpp
 )
 
 add_dependencies(AegisDesktopGuardService GenerateAegisRpc)
 
 target_include_directories(AegisDesktopGuardService PRIVATE
     src/common
+    src/service
     ${RPC_GENERATED_DIR}
 )
 
