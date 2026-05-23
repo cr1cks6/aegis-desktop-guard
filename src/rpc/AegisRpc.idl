@@ -1,0 +1,59 @@
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+    uuid(7d9f66aa-7ec8-4e22-86b5-3b2f3c7f9a91),
+    version(1.0),
+    implicit_handle(handle_t AegisRpcBinding)
+]
+interface AegisRpc
+{
+    void AegisStopService();
+
+    int AegisGetCurrentUser(
+        [out] int* authenticated,
+        [out, string] wchar_t** username
+    );
+
+    int AegisLogin(
+        [in, string] const wchar_t* username,
+        [in, string] const wchar_t* password
+    );
+
+    int AegisLogout();
+
+    int AegisGetLicenseInfo(
+        [out] int* active,
+        [out, string] wchar_t** expiresAt
+    );
+
+    int AegisActivateProduct(
+        [in, string] const wchar_t* activationCode
+    );
+
+    int AegisIsAntivirusAvailable(
+        [out] int* available
+    );
+
+    int AegisGetAvDatabaseInfo(
+        [out] int* loaded,
+        [out] unsigned long* recordCount,
+        [out, string] wchar_t** releaseDate
+    );
+
+    int AegisScanFile(
+        [in, string] const wchar_t* filePath,
+        [out] int* status,
+        [out, string] wchar_t** threatName,
+        [out] unsigned long* scannedObjects,
+        [out] unsigned long* infectedObjects
+    );
+
+    int AegisScanDirectory(
+        [in, string] const wchar_t* directoryPath,
+        [out] int* status,
+        [out, string] wchar_t** threatName,
+        [out] unsigned long* scannedObjects,
+        [out] unsigned long* infectedObjects
+    );
+}
