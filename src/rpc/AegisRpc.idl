@@ -1,0 +1,12 @@
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+    uuid(7d9f66aa-7ec8-4e22-86b5-3b2f3c7f9a91),
+    version(1.0),
+    implicit_handle(handle_t AegisRpcBinding)
+]
+interface AegisRpc
+{
+    void AegisStopService();
+}
