@@ -9,4 +9,29 @@ import "ocidl.idl";
 interface AegisRpc
 {
     void AegisStopService();
+
+    int AegisGetCurrentUser(
+        [out] int* authenticated,
+        [out, string] wchar_t** username
+    );
+
+    int AegisLogin(
+        [in, string] const wchar_t* username,
+        [in, string] const wchar_t* password
+    );
+
+    int AegisLogout();
+
+    int AegisGetLicenseInfo(
+        [out] int* active,
+        [out, string] wchar_t** expiresAt
+    );
+
+    int AegisActivateProduct(
+        [in, string] const wchar_t* activationCode
+    );
+
+    int AegisIsAntivirusAvailable(
+        [out] int* available
+    );
 }

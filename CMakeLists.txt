@@ -152,6 +152,16 @@ target_link_libraries(AegisDesktopGuard PRIVATE
 
 add_executable(AegisDesktopGuardService
     src/service/main.cpp
+
+    src/service/AuthState.h
+    src/service/AuthManager.h
+    src/service/AuthManager.cpp
+
+    src/service/LicenseManager.h
+    src/service/LicenseManager.cpp
+
+    src/service/FeatureGate.h
+    src/service/FeatureGate.cpp
 )
 
 add_dependencies(AegisDesktopGuardService GenerateAegisRpc)

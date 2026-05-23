@@ -1,5 +1,8 @@
 #include "Constants.h"
 #include "WinError.h"
+#include "AuthManager.h"
+#include "LicenseManager.h"
+#include "FeatureGate.h"
 
 #include <windows.h>
 #include <wtsapi32.h>
@@ -11,6 +14,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 #pragma comment(lib, "Wtsapi32.lib")
@@ -24,6 +28,10 @@ SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 HANDLE g_stopEvent = nullptr;
 
 std::vector<PROCESS_INFORMATION> g_guiProcesses;
+
+aegis::AuthManager g_authManager;
+LicenseManager g_licenseManager;
+FeatureGate g_featureGate(g_authManager, g_licenseManager);
 
 void SetServiceState(DWORD state)
 {
@@ -262,6 +270,87 @@ extern "C" void AegisStopService()
     if (g_stopEvent != nullptr) {
         SetEvent(g_stopEvent);
     }
+}
+
+extern "C" int AegisGetCurrentUser(int* authenticated, wchar_t** username)
+{
+    if (authenticated == nullptr || username == nullptr) {
+        return 1;
+    }
+
+    *authenticated = g_authManager.IsAuthenticated() ? 1 : 0;
+
+    const std::wstring currentUsername = g_authManager.GetUsername();
+    const size_t size = (currentUsername.size() + 1) * sizeof(wchar_t);
+
+    *username = static_cast<wchar_t*>(midl_user_allocate(size));
+
+    if (*username == nullptr) {
+        return 2;
+    }
+
+    wcscpy_s(*username, currentUsername.size() + 1, currentUsername.c_str());
+    return 0;
+}
+
+extern "C" int AegisLogin(const wchar_t* username, const wchar_t* password)
+{
+    if (username == nullptr || password == nullptr) {
+        return 1;
+    }
+
+    return g_authManager.Login(username, password) ? 0 : 2;
+}
+
+extern "C" int AegisLogout()
+{
+    g_authManager.Logout();
+    g_licenseManager.Clear();
+    return 0;
+}
+
+extern "C" int AegisGetLicenseInfo(int* active, wchar_t** expiresAt)
+{
+    if (active == nullptr || expiresAt == nullptr) {
+        return 1;
+    }
+
+    *active = g_licenseManager.HasLicense() ? 1 : 0;
+
+    const std::wstring expiration = g_licenseManager.GetExpiresAt();
+    const size_t size = (expiration.size() + 1) * sizeof(wchar_t);
+
+    *expiresAt = static_cast<wchar_t*>(midl_user_allocate(size));
+
+    if (*expiresAt == nullptr) {
+        return 2;
+    }
+
+    wcscpy_s(*expiresAt, expiration.size() + 1, expiration.c_str());
+    return 0;
+}
+
+extern "C" int AegisActivateProduct(const wchar_t* activationCode)
+{
+    if (activationCode == nullptr) {
+        return 1;
+    }
+
+    if (!g_authManager.IsAuthenticated()) {
+        return 3;
+    }
+
+    return g_licenseManager.Activate(activationCode) ? 0 : 2;
+}
+
+extern "C" int AegisIsAntivirusAvailable(int* available)
+{
+    if (available == nullptr) {
+        return 1;
+    }
+
+    *available = g_featureGate.IsAntivirusAvailable() ? 1 : 0;
+    return 0;
 }
 
 extern "C" void* __RPC_USER midl_user_allocate(size_t size)
