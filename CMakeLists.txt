@@ -1,28 +1,200 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(AegisDesktopGuard VERSION 0.1.0 LANGUAGES CXX)
+project(AegisDesktopGuardTask5 VERSION 0.5.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(RPC_IDL_FILE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rpc/AegisRpc.idl
+)
+
+set(RPC_GENERATED_DIR
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/rpc
+)
+
+set(RPC_GENERATED_HEADER
+    ${RPC_GENERATED_DIR}/AegisRpc.h
+)
+
+set(RPC_CLIENT_STUB
+    ${RPC_GENERATED_DIR}/AegisRpc_c.c
+)
+
+set(RPC_SERVER_STUB
+    ${RPC_GENERATED_DIR}/AegisRpc_s.c
+)
+
+file(MAKE_DIRECTORY ${RPC_GENERATED_DIR})
+
+add_custom_command(
+    OUTPUT
+        ${RPC_GENERATED_HEADER}
+        ${RPC_CLIENT_STUB}
+        ${RPC_SERVER_STUB}
+
+    COMMAND midl
+        /nologo
+        /app_config
+        /env x64
+        /h AegisRpc.h
+        /cstub AegisRpc_c.c
+        /sstub AegisRpc_s.c
+        /out ${RPC_GENERATED_DIR}
+        ${RPC_IDL_FILE}
+
+    DEPENDS
+        ${RPC_IDL_FILE}
+
+    COMMENT "Generating Windows RPC files"
+)
+
+add_custom_target(GenerateAegisRpc
+    DEPENDS
+        ${RPC_GENERATED_HEADER}
+        ${RPC_CLIENT_STUB}
+        ${RPC_SERVER_STUB}
+)
+
+add_library(AegisCommon STATIC
+    src/common/WinError.cpp
+    src/common/WinError.h
+    src/common/Constants.h
+)
+
+target_include_directories(AegisCommon PUBLIC
+    src/common
+)
+
+add_library(AegisRpcClient STATIC
+    ${RPC_CLIENT_STUB}
+    ${RPC_GENERATED_HEADER}
+)
+
+add_dependencies(AegisRpcClient GenerateAegisRpc)
+
+target_include_directories(AegisRpcClient PUBLIC
+    ${RPC_GENERATED_DIR}
+)
+
+target_link_libraries(AegisRpcClient PUBLIC
+    Rpcrt4
+)
+
+add_library(AegisRpcServer STATIC
+    ${RPC_SERVER_STUB}
+    ${RPC_GENERATED_HEADER}
+)
+
+add_dependencies(AegisRpcServer GenerateAegisRpc)
+
+target_include_directories(AegisRpcServer PUBLIC
+    ${RPC_GENERATED_DIR}
+)
+
+target_link_libraries(AegisRpcServer PUBLIC
+    Rpcrt4
+)
 
 add_executable(AegisDesktopGuard WIN32
-    src/main.cpp
+    src/gui/main.cpp
 )
 
-target_compile_features(AegisDesktopGuard PRIVATE cxx_std_20)
+add_dependencies(AegisDesktopGuard GenerateAegisRpc)
 
-target_compile_definitions(AegisDesktopGuard PRIVATE
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
+target_include_directories(AegisDesktopGuard PRIVATE
+    src/common
+    ${RPC_GENERATED_DIR}
 )
-
-if(MSVC)
-    target_compile_options(AegisDesktopGuard PRIVATE /W4 /permissive- /utf-8)
-endif()
 
 target_link_libraries(AegisDesktopGuard PRIVATE
+    AegisCommon
+    AegisRpcClient
+
     user32
     shell32
-    gdi32
+    advapi32
+    wtsapi32
+    Rpcrt4
 )
 
-install(TARGETS AegisDesktopGuard RUNTIME DESTINATION bin)
+add_executable(AegisDesktopGuardService
+    src/service/main.cpp
+
+    src/service/AuthState.h
+    src/service/AuthManager.h
+    src/service/AuthManager.cpp
+
+    src/service/LicenseManager.h
+    src/service/LicenseManager.cpp
+
+    src/service/FeatureGate.h
+    src/service/FeatureGate.cpp
+
+    src/service/AvTypes.h
+    src/service/AvDatabase.h
+    src/service/AvDatabase.cpp
+
+    src/service/AvScanner.h
+    src/service/AvScanner.cpp
+
+    src/service/ScanManager.h
+    src/service/ScanManager.cpp
+
+    src/service/AvDatabaseStorage.h
+    src/service/AvDatabaseStorage.cpp
+
+    src/service/AvUpdateScheduler.h
+    src/service/AvUpdateScheduler.cpp
+)
+
+add_dependencies(AegisDesktopGuardService GenerateAegisRpc)
+
+target_include_directories(AegisDesktopGuardService PRIVATE
+    src/common
+    src/service
+    ${RPC_GENERATED_DIR}
+)
+
+target_link_libraries(AegisDesktopGuardService PRIVATE
+    AegisCommon
+    AegisRpcServer
+
+    advapi32
+    userenv
+    wtsapi32
+    shell32
+    Rpcrt4
+)
+
+foreach(target
+    AegisCommon
+    AegisRpcClient
+    AegisRpcServer
+    AegisDesktopGuard
+    AegisDesktopGuardService
+)
+    target_compile_features(${target} PRIVATE cxx_std_20)
+
+    target_compile_definitions(${target} PRIVATE
+        UNICODE
+        _UNICODE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            /W4
+            /permissive-
+            /utf-8
+        )
+    endif()
+endforeach()
+
+install(TARGETS
+    AegisDesktopGuard
+    AegisDesktopGuardService
+    RUNTIME DESTINATION bin
+)
