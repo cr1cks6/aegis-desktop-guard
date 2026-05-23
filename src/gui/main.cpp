@@ -1,12 +1,19 @@
-#include <windows.h>
-#include <shellapi.h>
+#include "Constants.h"
+#include "AegisRpc.h"
 
+#include <windows.h>
+#include <winerror.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
+#include <winsvc.h>
+#include <rpc.h>
+
+#include <cstdlib>
 #include <string>
 
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"AegisDesktopGuardWindowClass";
-constexpr wchar_t kMutexName[] = L"Local\\AegisDesktopGuardSingleInstance";
 constexpr UINT kTrayIconId = 1001;
 constexpr UINT kTrayMessage = WM_APP + 1;
 
@@ -25,8 +32,45 @@ void ShowMainWindow()
     SetForegroundWindow(g_mainWindow);
 }
 
+void RequestServiceStop()
+{
+    RPC_WSTR stringBinding = nullptr;
+
+    RPC_STATUS status = RpcStringBindingComposeW(
+        nullptr,
+        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(aegis::kRpcProtocolSequence)),
+        nullptr,
+        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(aegis::kRpcEndpoint)),
+        nullptr,
+        &stringBinding
+    );
+
+    if (status != 0) {
+        return;
+    }
+
+    status = RpcBindingFromStringBindingW(stringBinding, &AegisRpcBinding);
+    RpcStringFreeW(&stringBinding);
+
+    if (status != 0) {
+        return;
+    }
+
+    RpcTryExcept
+    {
+        AegisStopService();
+    }
+    RpcExcept(1)
+    {
+    }
+    RpcEndExcept
+
+    RpcBindingFree(&AegisRpcBinding);
+}
+
 void ExitApplication()
 {
+    RequestServiceStop();
     Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
     PostQuitMessage(0);
 }
@@ -39,16 +83,16 @@ HICON CreateTrayIcon()
 
     HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memoryDc, bitmap));
 
-    HBRUSH backgroundBrush = CreateSolidBrush(RGB(26, 88, 180));
+    HBRUSH backgroundBrush = CreateSolidBrush(RGB(30, 100, 190));
     RECT backgroundRect{0, 0, 32, 32};
     FillRect(memoryDc, &backgroundRect, backgroundBrush);
 
     HPEN whitePen = CreatePen(PS_SOLID, 3, RGB(255, 255, 255));
     HPEN oldPen = static_cast<HPEN>(SelectObject(memoryDc, whitePen));
 
-    MoveToEx(memoryDc, 9, 17, nullptr);
-    LineTo(memoryDc, 15, 23);
-    LineTo(memoryDc, 24, 9);
+    MoveToEx(memoryDc, 8, 17, nullptr);
+    LineTo(memoryDc, 14, 23);
+    LineTo(memoryDc, 25, 8);
 
     SelectObject(memoryDc, oldPen);
     SelectObject(memoryDc, oldBitmap);
@@ -121,6 +165,137 @@ void CreateMainMenu(HWND window)
     AppendMenuW(mainMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(fileMenu), L"Файл");
 
     SetMenu(window, mainMenu);
+}
+
+bool StartServiceIfNeeded()
+{
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+
+    if (manager == nullptr) {
+        return false;
+    }
+
+    SC_HANDLE service = OpenServiceW(
+        manager,
+        aegis::kServiceName,
+        SERVICE_QUERY_STATUS | SERVICE_START
+    );
+
+    if (service == nullptr) {
+        CloseServiceHandle(manager);
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    DWORD bytesNeeded = 0;
+
+    QueryServiceStatusEx(
+        service,
+        SC_STATUS_PROCESS_INFO,
+        reinterpret_cast<LPBYTE>(&status),
+        sizeof(status),
+        &bytesNeeded
+    );
+
+    if (status.dwCurrentState == SERVICE_RUNNING) {
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+        return false;
+    }
+
+    StartServiceW(service, 0, nullptr);
+
+    for (DWORD elapsed = 0; elapsed < aegis::kServiceStartTimeoutMs;
+         elapsed += aegis::kServicePollIntervalMs) {
+        Sleep(aegis::kServicePollIntervalMs);
+
+        QueryServiceStatusEx(
+            service,
+            SC_STATUS_PROCESS_INFO,
+            reinterpret_cast<LPBYTE>(&status),
+            sizeof(status),
+            &bytesNeeded
+        );
+
+        if (status.dwCurrentState == SERVICE_RUNNING) {
+            break;
+        }
+    }
+
+    CloseServiceHandle(service);
+    CloseServiceHandle(manager);
+
+    return true;
+}
+
+DWORD GetParentProcessId()
+{
+    DWORD currentProcessId = GetCurrentProcessId();
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+
+    if (!Process32FirstW(snapshot, &entry)) {
+        CloseHandle(snapshot);
+        return 0;
+    }
+
+    do {
+        if (entry.th32ProcessID == currentProcessId) {
+            CloseHandle(snapshot);
+            return entry.th32ParentProcessID;
+        }
+    } while (Process32NextW(snapshot, &entry));
+
+    CloseHandle(snapshot);
+    return 0;
+}
+
+std::wstring GetProcessName(DWORD processId)
+{
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+
+    if (!Process32FirstW(snapshot, &entry)) {
+        CloseHandle(snapshot);
+        return {};
+    }
+
+    do {
+        if (entry.th32ProcessID == processId) {
+            std::wstring name = entry.szExeFile;
+            CloseHandle(snapshot);
+            return name;
+        }
+    } while (Process32NextW(snapshot, &entry));
+
+    CloseHandle(snapshot);
+    return {};
+}
+
+bool IsStartedByService()
+{
+    const DWORD parentId = GetParentProcessId();
+
+    if (parentId == 0) {
+        return false;
+    }
+
+    const std::wstring parentName = GetProcessName(parentId);
+
+    return parentName == L"AegisDesktopGuardService.exe";
 }
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -211,25 +386,33 @@ bool HasArgument(LPWSTR commandLine, const std::wstring& expected)
 
 } // namespace
 
+extern "C" void* __RPC_USER midl_user_allocate(size_t size)
+{
+    return std::malloc(size);
+}
+
+extern "C" void __RPC_USER midl_user_free(void* pointer)
+{
+    std::free(pointer);
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCommand)
 {
     g_instance = instance;
 
-    HANDLE mutexHandle = CreateMutexW(nullptr, TRUE, kMutexName);
+    const bool serviceWasStarted = StartServiceIfNeeded();
 
-    if (mutexHandle == nullptr) {
-        return 1;
+    if (serviceWasStarted) {
+        return 0;
     }
 
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(mutexHandle);
+    if (!IsStartedByService()) {
         return 0;
     }
 
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
 
     if (!RegisterMainWindowClass()) {
-        CloseHandle(mutexHandle);
         return 1;
     }
 
@@ -249,7 +432,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     );
 
     if (g_mainWindow == nullptr) {
-        CloseHandle(mutexHandle);
         return 1;
     }
 
@@ -266,9 +448,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
-
-    ReleaseMutex(mutexHandle);
-    CloseHandle(mutexHandle);
 
     return static_cast<int>(message.wParam);
 }
