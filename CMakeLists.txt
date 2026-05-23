@@ -1,14 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(AegisDesktopGuardTask4 VERSION 0.4.0 LANGUAGES C CXX)
+project(AegisDesktopGuardTask5 VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-# =========================================================
-# RPC generation
-# =========================================================
 
 set(RPC_IDL_FILE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rpc/AegisRpc.idl
@@ -61,10 +57,6 @@ add_custom_target(GenerateAegisRpc
         ${RPC_SERVER_STUB}
 )
 
-# =========================================================
-# Common library
-# =========================================================
-
 add_library(AegisCommon STATIC
     src/common/WinError.cpp
     src/common/WinError.h
@@ -74,17 +66,6 @@ add_library(AegisCommon STATIC
 target_include_directories(AegisCommon PUBLIC
     src/common
 )
-
-target_compile_definitions(AegisCommon PRIVATE
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-)
-
-# =========================================================
-# RPC client library
-# =========================================================
 
 add_library(AegisRpcClient STATIC
     ${RPC_CLIENT_STUB}
@@ -101,10 +82,6 @@ target_link_libraries(AegisRpcClient PUBLIC
     Rpcrt4
 )
 
-# =========================================================
-# RPC server library
-# =========================================================
-
 add_library(AegisRpcServer STATIC
     ${RPC_SERVER_STUB}
     ${RPC_GENERATED_HEADER}
@@ -119,10 +96,6 @@ target_include_directories(AegisRpcServer PUBLIC
 target_link_libraries(AegisRpcServer PUBLIC
     Rpcrt4
 )
-
-# =========================================================
-# GUI application
-# =========================================================
 
 add_executable(AegisDesktopGuard WIN32
     src/gui/main.cpp
@@ -146,10 +119,6 @@ target_link_libraries(AegisDesktopGuard PRIVATE
     Rpcrt4
 )
 
-# =========================================================
-# Windows service
-# =========================================================
-
 add_executable(AegisDesktopGuardService
     src/service/main.cpp
 
@@ -172,6 +141,12 @@ add_executable(AegisDesktopGuardService
 
     src/service/ScanManager.h
     src/service/ScanManager.cpp
+
+    src/service/AvDatabaseStorage.h
+    src/service/AvDatabaseStorage.cpp
+
+    src/service/AvUpdateScheduler.h
+    src/service/AvUpdateScheduler.cpp
 )
 
 add_dependencies(AegisDesktopGuardService GenerateAegisRpc)
@@ -193,10 +168,6 @@ target_link_libraries(AegisDesktopGuardService PRIVATE
     Rpcrt4
 )
 
-# =========================================================
-# Global compiler settings
-# =========================================================
-
 foreach(target
     AegisCommon
     AegisRpcClient
@@ -204,7 +175,6 @@ foreach(target
     AegisDesktopGuard
     AegisDesktopGuardService
 )
-
     target_compile_features(${target} PRIVATE cxx_std_20)
 
     target_compile_definitions(${target} PRIVATE
@@ -221,12 +191,7 @@ foreach(target
             /utf-8
         )
     endif()
-
 endforeach()
-
-# =========================================================
-# Install
-# =========================================================
 
 install(TARGETS
     AegisDesktopGuard

@@ -7,6 +7,8 @@
 
 #include "AvDatabase.h"
 #include "ScanManager.h"
+#include "AvDatabaseStorage.h"
+#include "AvUpdateScheduler.h"
 
 #include <windows.h>
 #include <wtsapi32.h>
@@ -39,6 +41,9 @@ FeatureGate g_featureGate(g_authManager, g_licenseManager);
 
 AvDatabase g_avDatabase;
 ScanManager g_scanManager(g_avDatabase, g_licenseManager);
+
+AvDatabaseStorage g_databaseStorage(g_avDatabase);
+AvUpdateScheduler g_updateScheduler(g_databaseStorage);
 
 void SetServiceState(DWORD state)
 {
@@ -232,6 +237,9 @@ void WINAPI ServiceMain(DWORD, LPWSTR*)
         return;
     }
 
+    g_databaseStorage.Load();
+    g_updateScheduler.Start();
+
     LaunchGuiForAllSessions();
 
     HANDLE rpcThread = CreateThread(
@@ -244,8 +252,11 @@ void WINAPI ServiceMain(DWORD, LPWSTR*)
     );
 
     if (rpcThread == nullptr) {
+        g_updateScheduler.Stop();
+
         CloseHandle(g_stopEvent);
         g_stopEvent = nullptr;
+
         SetServiceState(SERVICE_STOPPED);
         return;
     }
@@ -255,6 +266,8 @@ void WINAPI ServiceMain(DWORD, LPWSTR*)
     WaitForSingleObject(g_stopEvent, INFINITE);
 
     SetServiceState(SERVICE_STOP_PENDING);
+
+    g_updateScheduler.Stop();
 
     RpcMgmtStopServerListening(nullptr);
     RpcServerUnregisterIf(nullptr, nullptr, FALSE);
@@ -288,23 +301,15 @@ extern "C" int AegisGetCurrentUser(int* authenticated, wchar_t** username)
     *authenticated = g_authManager.IsAuthenticated() ? 1 : 0;
 
     const std::wstring currentUsername = g_authManager.GetUsername();
+    const size_t size = (currentUsername.size() + 1) * sizeof(wchar_t);
 
-    const size_t size =
-        (currentUsername.size() + 1) * sizeof(wchar_t);
-
-    *username =
-        static_cast<wchar_t*>(midl_user_allocate(size));
+    *username = static_cast<wchar_t*>(midl_user_allocate(size));
 
     if (*username == nullptr) {
         return 2;
     }
 
-    wcscpy_s(
-        *username,
-        currentUsername.size() + 1,
-        currentUsername.c_str()
-    );
-
+    wcscpy_s(*username, currentUsername.size() + 1, currentUsername.c_str());
     return 0;
 }
 
@@ -316,9 +321,7 @@ extern "C" int AegisLogin(
         return 1;
     }
 
-    return g_authManager.Login(username, password)
-        ? 0
-        : 2;
+    return g_authManager.Login(username, password) ? 0 : 2;
 }
 
 extern "C" int AegisLogout()
@@ -339,30 +342,20 @@ extern "C" int AegisGetLicenseInfo(
 
     *active = g_licenseManager.HasLicense() ? 1 : 0;
 
-    const std::wstring expiration =
-        g_licenseManager.GetExpiresAt();
+    const std::wstring expiration = g_licenseManager.GetExpiresAt();
+    const size_t size = (expiration.size() + 1) * sizeof(wchar_t);
 
-    const size_t size =
-        (expiration.size() + 1) * sizeof(wchar_t);
-
-    *expiresAt =
-        static_cast<wchar_t*>(midl_user_allocate(size));
+    *expiresAt = static_cast<wchar_t*>(midl_user_allocate(size));
 
     if (*expiresAt == nullptr) {
         return 2;
     }
 
-    wcscpy_s(
-        *expiresAt,
-        expiration.size() + 1,
-        expiration.c_str()
-    );
-
+    wcscpy_s(*expiresAt, expiration.size() + 1, expiration.c_str());
     return 0;
 }
 
-extern "C" int AegisActivateProduct(
-    const wchar_t* activationCode)
+extern "C" int AegisActivateProduct(const wchar_t* activationCode)
 {
     if (activationCode == nullptr) {
         return 1;
@@ -377,6 +370,7 @@ extern "C" int AegisActivateProduct(
     }
 
     g_scanManager.LoadDatabaseAfterActivation();
+    g_databaseStorage.Save();
 
     return 0;
 }
@@ -387,11 +381,7 @@ extern "C" int AegisIsAntivirusAvailable(int* available)
         return 1;
     }
 
-    *available =
-        g_featureGate.IsAntivirusAvailable()
-        ? 1
-        : 0;
-
+    *available = g_featureGate.IsAntivirusAvailable() ? 1 : 0;
     return 0;
 }
 
@@ -406,28 +396,20 @@ extern "C" int AegisGetAvDatabaseInfo(
         return 1;
     }
 
-    const AvDatabaseInfo info =
-        g_scanManager.GetDatabaseInfo();
+    const AvDatabaseInfo info = g_scanManager.GetDatabaseInfo();
 
     *loaded = info.loaded ? 1 : 0;
     *recordCount = info.recordCount;
 
-    const size_t size =
-        (info.releaseDate.size() + 1) * sizeof(wchar_t);
+    const size_t size = (info.releaseDate.size() + 1) * sizeof(wchar_t);
 
-    *releaseDate =
-        static_cast<wchar_t*>(midl_user_allocate(size));
+    *releaseDate = static_cast<wchar_t*>(midl_user_allocate(size));
 
     if (*releaseDate == nullptr) {
         return 2;
     }
 
-    wcscpy_s(
-        *releaseDate,
-        info.releaseDate.size() + 1,
-        info.releaseDate.c_str()
-    );
-
+    wcscpy_s(*releaseDate, info.releaseDate.size() + 1, info.releaseDate.c_str());
     return 0;
 }
 
@@ -446,34 +428,21 @@ extern "C" int AegisScanFile(
         return 1;
     }
 
-    const ScanResult result =
-        g_scanManager.ScanFile(filePath);
+    const ScanResult result = g_scanManager.ScanFile(filePath);
 
-    *status =
-        static_cast<int>(result.status);
+    *status = static_cast<int>(result.status);
+    *scannedObjects = result.scannedObjects;
+    *infectedObjects = result.infectedObjects;
 
-    *scannedObjects =
-        result.scannedObjects;
+    const size_t size = (result.threatName.size() + 1) * sizeof(wchar_t);
 
-    *infectedObjects =
-        result.infectedObjects;
-
-    const size_t size =
-        (result.threatName.size() + 1) * sizeof(wchar_t);
-
-    *threatName =
-        static_cast<wchar_t*>(midl_user_allocate(size));
+    *threatName = static_cast<wchar_t*>(midl_user_allocate(size));
 
     if (*threatName == nullptr) {
         return 2;
     }
 
-    wcscpy_s(
-        *threatName,
-        result.threatName.size() + 1,
-        result.threatName.c_str()
-    );
-
+    wcscpy_s(*threatName, result.threatName.size() + 1, result.threatName.c_str());
     return 0;
 }
 
@@ -492,34 +461,21 @@ extern "C" int AegisScanDirectory(
         return 1;
     }
 
-    const ScanResult result =
-        g_scanManager.ScanDirectory(directoryPath);
+    const ScanResult result = g_scanManager.ScanDirectory(directoryPath);
 
-    *status =
-        static_cast<int>(result.status);
+    *status = static_cast<int>(result.status);
+    *scannedObjects = result.scannedObjects;
+    *infectedObjects = result.infectedObjects;
 
-    *scannedObjects =
-        result.scannedObjects;
+    const size_t size = (result.threatName.size() + 1) * sizeof(wchar_t);
 
-    *infectedObjects =
-        result.infectedObjects;
-
-    const size_t size =
-        (result.threatName.size() + 1) * sizeof(wchar_t);
-
-    *threatName =
-        static_cast<wchar_t*>(midl_user_allocate(size));
+    *threatName = static_cast<wchar_t*>(midl_user_allocate(size));
 
     if (*threatName == nullptr) {
         return 2;
     }
 
-    wcscpy_s(
-        *threatName,
-        result.threatName.size() + 1,
-        result.threatName.c_str()
-    );
-
+    wcscpy_s(*threatName, result.threatName.size() + 1, result.threatName.c_str());
     return 0;
 }
 
